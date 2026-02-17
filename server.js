@@ -243,6 +243,7 @@ class GameWebSocketClient {
             }
             if (totalEvents > 0) streakContinueProb = continueCount / totalEvents;
         }
+        if (isNaN(streakContinueProb)) streakContinueProb = 0.5;
 
         let m1 = { tai: 0.5, xiu: 0.5 };
         if (len >= 2) {
@@ -258,6 +259,10 @@ class GameWebSocketClient {
                 m1 = { [first]: same / total, [first === 'tài' ? 'xỉu' : 'tài']: diff / total };
             }
         }
+        // Đảm bảo m1 có giá trị hợp lệ
+        if (isNaN(m1.tai) || isNaN(m1.xiu)) {
+            m1 = { tai: 0.5, xiu: 0.5 };
+        }
 
         let m2 = null;
         if (len >= 3) {
@@ -271,15 +276,20 @@ class GameWebSocketClient {
             if (trans[lastTwo]) {
                 const t = trans[lastTwo];
                 const total = t.tai + t.xiu;
-                if (total > 0) m2 = { tai: t.tai / total, xiu: t.xiu / total };
+                if (total > 0) {
+                    m2 = { tai: t.tai / total, xiu: t.xiu / total };
+                }
             }
         }
 
         let pattern = { pred: null, conf: 0 };
         if (len >= 10) {
             const recent = results.slice(0, 10);
-            if (recent[0] === recent[1]) pattern = { pred: recent[0], conf: 0.6 };
-            else pattern = { pred: recent[0] === 'tài' ? 'xỉu' : 'tài', conf: 0.65 };
+            if (recent[0] === recent[1]) {
+                pattern = { pred: recent[0], conf: 0.6 };
+            } else {
+                pattern = { pred: recent[0] === 'tài' ? 'xỉu' : 'tài', conf: 0.65 };
+            }
         }
 
         return {
@@ -292,6 +302,7 @@ class GameWebSocketClient {
         };
     }
 
+    // *** HÀM PREDICT ĐÃ SỬA LỖI ***
     predictNext(historyArray) {
         if (historyArray.length < 5) return { success: false, message: `Chỉ có ${historyArray.length} phiên, cần ít nhất 5` };
         const resultsAll = this._toResultArray(historyArray, 200);
@@ -311,44 +322,74 @@ class GameWebSocketClient {
             const analysis = this._analyzeWindow(windowSlice);
             if (!analysis) continue;
 
+            // Kiểm tra an toàn các giá trị
+            if (isNaN(analysis.freqTai) || isNaN(analysis.freqXiu)) continue;
+            let streakProb = analysis.streak.probContinue;
+            if (isNaN(streakProb)) streakProb = 0.5;
+
+            let m1t = analysis.markov1.tai;
+            let m1x = analysis.markov1.xiu;
+            if (isNaN(m1t) || isNaN(m1x)) { m1t = 0.5; m1x = 0.5; }
+
+            let m2t = null, m2x = null;
+            if (analysis.markov2) {
+                m2t = analysis.markov2.tai;
+                m2x = analysis.markov2.xiu;
+                if (isNaN(m2t) || isNaN(m2x)) { m2t = null; m2x = null; }
+            }
+
+            let patternPred = analysis.pattern.pred;
+            let patternConf = analysis.pattern.conf;
+            if (patternPred && isNaN(patternConf)) patternConf = 0;
+
             let taiScore = 0, xiuScore = 0, weightSum = 0;
 
+            // 1. Tần suất
             taiScore += analysis.freqTai * 1.0;
             xiuScore += analysis.freqXiu * 1.0;
             weightSum += 1.0;
 
+            // 2. Streak
             if (analysis.streak.outcome === 'tài') {
-                taiScore += analysis.streak.probContinue * 1.2;
-                xiuScore += (1 - analysis.streak.probContinue) * 1.2;
+                taiScore += streakProb * 1.2;
+                xiuScore += (1 - streakProb) * 1.2;
             } else {
-                xiuScore += analysis.streak.probContinue * 1.2;
-                taiScore += (1 - analysis.streak.probContinue) * 1.2;
+                xiuScore += streakProb * 1.2;
+                taiScore += (1 - streakProb) * 1.2;
             }
             weightSum += 1.2;
 
-            taiScore += analysis.markov1.tai * 1.3;
-            xiuScore += analysis.markov1.xiu * 1.3;
+            // 3. Markov1
+            taiScore += m1t * 1.3;
+            xiuScore += m1x * 1.3;
             weightSum += 1.3;
 
-            if (analysis.markov2) {
-                taiScore += analysis.markov2.tai * 1.5;
-                xiuScore += analysis.markov2.xiu * 1.5;
+            // 4. Markov2
+            if (m2t !== null && m2x !== null) {
+                taiScore += m2t * 1.5;
+                xiuScore += m2x * 1.5;
                 weightSum += 1.5;
             }
 
-            if (analysis.pattern.pred) {
-                if (analysis.pattern.pred === 'tài') {
-                    taiScore += analysis.pattern.conf * 1.0;
-                    xiuScore += (1 - analysis.pattern.conf) * 1.0;
+            // 5. Pattern
+            if (patternPred) {
+                if (patternPred === 'tài') {
+                    taiScore += patternConf * 1.0;
+                    xiuScore += (1 - patternConf) * 1.0;
                 } else {
-                    xiuScore += analysis.pattern.conf * 1.0;
-                    taiScore += (1 - analysis.pattern.conf) * 1.0;
+                    xiuScore += patternConf * 1.0;
+                    taiScore += (1 - patternConf) * 1.0;
                 }
                 weightSum += 1.0;
             }
 
+            if (weightSum === 0) continue;
+
             const windowTai = taiScore / weightSum;
             const windowXiu = xiuScore / weightSum;
+
+            if (isNaN(windowTai) || isNaN(windowXiu)) continue;
+
             windowResults.push({ size: w.size, tai: windowTai, xiu: windowXiu });
 
             totalTaiScore += windowTai * w.weight;
@@ -356,20 +397,34 @@ class GameWebSocketClient {
             totalWeight += w.weight;
         }
 
-        if (totalWeight === 0) return { success: false, message: "Không đủ dữ liệu để phân tích" };
+        if (totalWeight === 0) {
+            return { success: false, message: "Không đủ dữ liệu để phân tích (totalWeight=0)" };
+        }
 
+        // Xu hướng dài hạn
         if (resultsAll.length >= 100) {
             const recent20 = resultsAll.slice(0, 20);
             const recent100 = resultsAll.slice(0, 100);
             const tai20 = recent20.filter(r => r === 'tài').length / 20;
             const tai100 = recent100.filter(r => r === 'tài').length / 100;
             const trend = tai20 - tai100;
-            if (trend > 0.1) { totalTaiScore *= 1.02; totalXiuScore *= 0.98; }
-            else if (trend < -0.1) { totalTaiScore *= 0.98; totalXiuScore *= 1.02; }
+            if (!isNaN(trend)) {
+                if (trend > 0.1) { totalTaiScore *= 1.02; totalXiuScore *= 0.98; }
+                else if (trend < -0.1) { totalTaiScore *= 0.98; totalXiuScore *= 1.02; }
+            }
+        }
+
+        if (isNaN(totalTaiScore) || isNaN(totalXiuScore)) {
+            return { success: false, message: "Lỗi tính toán điểm số" };
         }
 
         const finalTai = totalTaiScore / totalWeight;
         const finalXiu = totalXiuScore / totalWeight;
+
+        if (isNaN(finalTai) || isNaN(finalXiu)) {
+            return { success: false, message: "Kết quả dự đoán không hợp lệ (NaN)" };
+        }
+
         let prediction = finalTai > finalXiu ? 'tài' : (finalXiu > finalTai ? 'xỉu' : 'không xác định');
         let confidence = prediction === 'tài' ? finalTai * 100 : (prediction === 'xỉu' ? finalXiu * 100 : 0);
         if (isNaN(confidence)) confidence = 0;
